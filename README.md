@@ -1,9 +1,9 @@
-# n8n Node: Wajs
+# n8n Node: Mcp Tool
 
-Ini adalah *community node* n8n untuk berinteraksi dengan layanan Wajs.
+Ini adalah *community node* n8n untuk berinteraksi dengan layanan Mcp Tool.
 
 [![n8n-compatible](https://img.shields.io/badge/n8n-compatible-success.svg)](https://n8n.io)
-[![npm version](https://img.shields.io/npm/v/n8n-nodes-wajs.svg)](https://www.npmjs.com/package/n8n-nodes-wajs)
+[![npm version](https://img.shields.io/npm/v/n8n-nodes-mcp-tool.svg)](https://www.npmjs.com/package/n8n-nodes-mcp-tool)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://spdx.org/licenses/MIT.html)
 
 ## Kompatibilitas n8n
@@ -15,23 +15,23 @@ Telah diuji dengan n8n versi `1.117.1` dan yang lebih baru.
 1.  Buka n8n.
 2.  Pergi ke **Settings > Community Nodes**.
 3.  Pilih **Install**.
-4.  Masukkan `n8n-nodes-wajs` sebagai nama paket npm.
+4.  Masukkan `n8n-nodes-mcp-tool` sebagai nama paket npm.
 5.  Klik **Install**.
 
 Setelah instalasi selesai, node akan muncul di panel node Anda.
 
 ## Kredensial
 
-Node ini memerlukan kredensial untuk terhubung ke Wajs.
+Node ini memerlukan kredensial untuk terhubung ke Mcp Tool.
 
 1.  Dari sidebar n8n, buka **Credentials > New**.
-2.  Cari **Wajs Credentials** dan pilih.
-3.  Isi informasi yang diperlukan untuk mengautentikasi akun Wajs Anda.
+2.  Cari **Mcp Tool Credentials** dan pilih.
+3.  Isi informasi yang diperlukan untuk mengautentikasi akun Mcp Tool Anda.
 
 ## Operasi
 
 Node ini menyediakan operasi berikut:
-*   **Wajs**: Operasi utama untuk berinteraksi dengan API Wajs.
+*   **Mcp Tool**: Operasi utama untuk berinteraksi dengan API Mcp Tool.
 
 ## Pengembangan (Development)
 
