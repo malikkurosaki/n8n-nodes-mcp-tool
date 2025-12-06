@@ -1,0 +1,377 @@
+import {
+	type IDataObject,
+	type INodeExecutionData,
+	type INodeType,
+	type INodeTypeDescription,
+	type INodePropertyOptions,
+	type ILoadOptionsFunctions,
+	NodeOperationError,
+} from 'n8n-workflow';
+
+import { OptionsWithUri } from 'request';
+
+/* -------------------------
+   Types
+   ------------------------- */
+interface MCPPayload {
+	name: string;
+	description?: string;
+	inputSchema?: IDataObject;
+	'x-props': {
+		method: string;
+		path: string;
+		operationId?: string;
+		tag?: string;
+		deprecated?: boolean;
+		summary?: string;
+	};
+}
+
+interface MCPToolsResponse {
+	tools: MCPPayload[];
+}
+
+/* -------------------------
+   Helper Functions
+   ------------------------- */
+/**
+ * Extract base URL and MCP path from endpoint
+ * Examples:
+ * - "https://example.com/mcp" → { baseUrl: "https://example.com", mcpPath: "/mcp" }
+ * - "https://example.com" → { baseUrl: "https://example.com", mcpPath: "" }
+ */
+function parseEndpoint(endpoint: string): { baseUrl: string; mcpPath: string } {
+	const trimmed = endpoint.trim().replace(/\/+$/, '');
+	
+	// Check if endpoint has /mcp or similar path
+	const url = new URL(trimmed);
+	const pathname = url.pathname;
+	
+	if (pathname && pathname !== '/') {
+		// Has path component (e.g., /mcp)
+		return {
+			baseUrl: `${url.protocol}//${url.host}`,
+			mcpPath: pathname
+		};
+	}
+	
+	// No path component
+	return {
+		baseUrl: trimmed,
+		mcpPath: ''
+	};
+}
+
+/* -------------------------
+   Node Implementation
+   ------------------------- */
+export class McpClientTool implements INodeType {
+	description: INodeTypeDescription = {
+		displayName: 'MCP Client Tool',
+		name: 'mcpClientTool',
+		icon: 'file:icon.svg',
+		group: ['transform'],
+		version: 1,
+		usableAsTool: true,
+		description:
+			'Dynamically executes tools from an MCP server based on AI agent input. Fetches tool metadata from /tools and provides dynamic tool definitions for agents.',
+		defaults: { name: 'MCP Client' },
+		inputs: ['main'],
+		outputs: ['main'],
+		credentials: [{ name: 'mcptool', required: false }],
+		properties: [
+			{
+				displayName: 'Endpoint',
+				name: 'endpoint',
+				type: 'string',
+				default: 'https://cld-dkr-prod-jenna-mcp.wibudev.com/mcp',
+				required: true,
+				description: 'MCP server endpoint. Can include path (e.g., /mcp) for metadata endpoints.',
+			},
+			{
+				displayName: 'Server Transport',
+				name: 'transport',
+				type: 'options',
+				options: [
+					{ name: 'HTTP (Streamable)', value: 'http' },
+					{ name: 'Server Sent Events (Deprecated)', value: 'sse' },
+				],
+				default: 'http',
+			},
+			{
+				displayName: 'Tools to Include',
+				name: 'toolSelection',
+				type: 'options',
+				options: [
+					{ name: 'All', value: 'all' },
+					{ name: 'Selected', value: 'selected' },
+					{ name: 'All Except', value: 'except' },
+				],
+				default: 'all',
+			},
+			{
+				displayName: 'Selected Tools',
+				name: 'selectedTools',
+				type: 'multiOptions',
+				typeOptions: {
+					loadOptionsMethod: 'getMcpTools',
+				},
+				default: [],
+				displayOptions: {
+					show: {
+						toolSelection: ['selected', 'except'],
+					},
+				},
+			},
+		],
+	};
+
+	/* ----------------------------------------
+	   loadOptions + loadMethods
+	   ---------------------------------------- */
+	methods = {
+		loadOptions: {
+			/** Fetch tools for UI multi-select */
+			async getMcpTools(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+				const endpoint = this.getNodeParameter('endpoint', 0) as string;
+				const { baseUrl, mcpPath } = parseEndpoint(endpoint);
+
+				let authHeader: any = '';
+				try {
+					// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+					// @ts-ignore
+					const credentials = await this.getCredentials('mcptool');
+					if (credentials?.authHeader) authHeader = credentials.authHeader;
+				} catch {}
+
+				// Use full endpoint (with MCP path) for /tools
+				const toolsUrl = `${baseUrl}${mcpPath}/tools`;
+
+				const requestOptions: OptionsWithUri = {
+					method: 'GET',
+					uri: toolsUrl,
+					json: true,
+					headers: authHeader ? { Authorization: authHeader } : {},
+					timeout: 15000,
+				};
+
+				let toolsRes: MCPToolsResponse;
+				try {
+					toolsRes = await (this as any).helpers.request(requestOptions);
+				} catch (err) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Failed to fetch MCP tools from ${toolsUrl}: ${(err as Error).message}`,
+					);
+				}
+
+				if (!toolsRes?.tools) {
+					throw new NodeOperationError(this.getNode(), 'Invalid MCP /tools response');
+				}
+
+				return toolsRes.tools.map((tool) => ({
+					name: `${tool.name} — ${tool.description || tool['x-props'].summary || ''}`,
+					value: tool.name,
+				}));
+			},
+		},
+
+		/* ----------------------------------------
+		   LLM / Agent function definitions
+		---------------------------------------- */
+		loadMethods: {
+			async getAiToolDefinitions(this: any) {
+				const endpoint = this.getNodeParameter?.('endpoint', 0) as string;
+				if (!endpoint) return [];
+
+				const { baseUrl, mcpPath } = parseEndpoint(endpoint);
+
+				let authHeader = '';
+				try {
+					// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+					// @ts-ignore
+					const credentials = await this.getCredentials?.('mcptool');
+					if (credentials?.authHeader) authHeader = credentials.authHeader;
+				} catch {}
+
+				// Use full endpoint (with MCP path) for /tools
+				const toolsUrl = `${baseUrl}${mcpPath}/tools`;
+
+				let toolsRes: MCPToolsResponse;
+				try {
+					toolsRes = await (this as any).helpers.request({
+						method: 'GET',
+						uri: toolsUrl,
+						json: true,
+						headers: authHeader ? { Authorization: authHeader } : {},
+						timeout: 15000,
+					});
+				} catch {
+					return [];
+				}
+
+				if (!Array.isArray(toolsRes?.tools)) return [];
+
+				const mode = this.getNodeParameter?.('toolSelection', 0) as string;
+				const selected = this.getNodeParameter?.('selectedTools', 0) as string[];
+
+				const filtered = toolsRes.tools.filter((t) => {
+					if (mode === 'all') return true;
+					if (mode === 'selected') return selected.includes(t.name);
+					if (mode === 'except') return !selected.includes(t.name);
+					return true;
+				});
+
+				return filtered.map((t) => ({
+					name: t.name,
+					description: t.description || t['x-props'].summary || '',
+					parameters:
+						t.inputSchema && typeof t.inputSchema === 'object'
+							? t.inputSchema
+							: { type: 'object', properties: {} },
+					__meta: { ...t['x-props'] },
+				}));
+			},
+		},
+	};
+
+	/* ----------------------------------------
+	   EXECUTION: Run tool from AI input
+	   ---------------------------------------- */
+	async execute(this: any): Promise<INodeExecutionData[][]> {
+		const items = this.getInputData();
+		const output: INodeExecutionData[] = [];
+
+		const endpoint = this.getNodeParameter('endpoint', 0) as string;
+		const { baseUrl, mcpPath } = parseEndpoint(endpoint);
+
+		let authHeader = '';
+		try {
+			// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+			// @ts-ignore
+			const credentials = await this.getCredentials('mcptool');
+			if (credentials?.authHeader) authHeader = credentials.authHeader;
+		} catch {}
+
+		/* Fetch tools once to build map */
+		// Use full endpoint (with MCP path) for /tools
+		const toolsUrl = `${baseUrl}${mcpPath}/tools`;
+
+		let toolsRes: MCPToolsResponse;
+		try {
+			toolsRes = await this.helpers.request({
+				method: 'GET',
+				uri: toolsUrl,
+				json: true,
+				headers: authHeader ? { Authorization: authHeader } : {},
+				timeout: 15000,
+			});
+		} catch (err) {
+			throw new NodeOperationError(
+				this.getNode(),
+				`Failed to fetch MCP tools during execution from ${toolsUrl}: ${(err as Error).message}`,
+			);
+		}
+
+		if (!toolsRes?.tools) {
+			throw new NodeOperationError(this.getNode(), 'Invalid tools list from MCP server');
+		}
+
+		const toolMap = new Map<string, MCPPayload>();
+		for (const t of toolsRes.tools) toolMap.set(t.name, t);
+
+		/* ----------------------------------------
+		   Execute each item
+		---------------------------------------- */
+		for (const item of items) {
+			try {
+				const json = item.json || {};
+
+				// Accept multiple naming styles
+				const toolName =
+					json.tool ||
+					json.toolName ||
+					json.tool_name ||
+					null;
+
+				if (!toolName) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Missing "tool" field in input JSON. Expected { "tool": "<name>", "arguments": { ... } }`,
+					);
+				}
+
+				const tool = toolMap.get(toolName);
+				if (!tool) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Tool "${toolName}" not found. Available: ${[...toolMap.keys()].join(', ')}`,
+					);
+				}
+
+				let args: IDataObject =
+					json.arguments ||
+					json.args ||
+					json.parameters ||
+					{};
+
+				/* Normalize HTTP info */
+				const method = (tool['x-props'].method || 'GET').toUpperCase();
+				let path = tool['x-props'].path || '/';
+
+				if (!path.startsWith('/')) path = `/${path}`;
+
+				// ✅ FIXED: Use only baseUrl for tool execution (without MCP path)
+				// This ensures we hit the actual API endpoints, not the MCP metadata endpoints
+				const url = `${baseUrl}${path}`;
+
+				const req: OptionsWithUri = {
+					method,
+					uri: url,
+					json: true,
+					headers: authHeader ? { Authorization: authHeader } : {},
+					timeout: 20000,
+				};
+
+				// GET/DELETE → querystring
+				if (method === 'GET' || method === 'DELETE') {
+					req.qs = args;
+				} else {
+					req.body = args;
+				}
+
+				let response: any;
+				try {
+					response = await this.helpers.request(req);
+				} catch (err: any) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Error calling tool "${toolName}" at ${url}: ${err.message || err}`,
+					);
+				}
+
+				/* Response */
+				output.push({
+					json: {
+						error: false,
+						tool: toolName,
+						method,
+						path,
+						url, // Added for debugging
+						response,
+					},
+				});
+			} catch (error) {
+				output.push({
+					json: {
+						error: true,
+						message: (error as Error).message,
+						input: item.json,
+					},
+				});
+			}
+		}
+
+		return [output];
+	}
+}

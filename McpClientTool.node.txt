@@ -1,0 +1,141 @@
+import {
+  IExecuteFunctions,
+  INodeExecutionData,
+  INodeType,
+  INodeTypeDescription,
+  NodeOperationError,
+} from "n8n-workflow";
+
+import axios from "axios";
+
+export class McpClientTool implements INodeType {
+  description: INodeTypeDescription = {
+    displayName: "MCP Client Tool",
+    name: "mcpClientTool",
+    group: ["transform"],
+    version: 1,
+    description: "Client untuk berinteraksi dengan MCP Server",
+    defaults: {
+      name: "MCP Client Tool",
+    },
+    icon: "file:icon.svg",
+    inputs: ["main"],
+    outputs: ["main"],
+
+    credentials: [
+      {
+        name: "mcptool",
+        required: false,
+      },
+    ],
+    usableAsTool: true,
+    properties: [
+      {
+        displayName: "MCP Endpoint",
+        name: "endpoint",
+        type: "string",
+        default: "",
+        placeholder: "https://your-mcp-server.com/mcp",
+        required: true,
+      },
+
+      {
+        displayName: "Transport",
+        name: "transport",
+        type: "options",
+        options: [
+          { name: "HTTP", value: "http" },
+          { name: "HTTP Streamable", value: "http-stream" },
+        ],
+        default: "http-stream",
+      },
+
+      {
+        displayName: "Authentication",
+        name: "authMode",
+        type: "options",
+        default: "none",
+        options: [
+          { name: "None", value: "none" },
+          { name: "API Key", value: "apikey" },
+        ],
+      },
+
+      {
+        displayName: "API Key",
+        name: "apiKey",
+        type: "string",
+        default: "",
+        typeOptions: { password: true },
+        displayOptions: {
+          show: { authMode: ["apikey"] },
+        },
+      },
+
+      {
+        displayName: "Payload JSON",
+        name: "payload",
+        type: "json",
+        default: `{ "action": "ping" }`,
+        required: true,
+      },
+    ],
+  };
+
+  async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
+    const endpoint = this.getNodeParameter("endpoint", 0) as string;
+    const transport = this.getNodeParameter("transport", 0) as string;
+    const authMode = this.getNodeParameter("authMode", 0) as string;
+    const apiKey = this.getNodeParameter("apiKey", 0) as string;
+    const payload = this.getNodeParameter("payload", 0) as object;
+
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+
+      if (authMode === "apikey") {
+        headers["Authorization"] = `Bearer ${apiKey}`;
+      }
+
+      // MCP Standard Payload Envelope
+      const mcpBody = {
+        transport,
+        timestamp: Date.now(),
+        payload,
+      };
+
+      const response = await axios.post(endpoint, mcpBody, {
+        headers,
+        responseType: transport === "http-stream" ? "stream" : "json",
+      });
+
+      // If streaming mode (MCP Streamable)
+      if (transport === "http-stream" && response.data.readable) {
+        const chunks: Buffer[] = [];
+
+        for await (const chunk of response.data) {
+          chunks.push(Buffer.from(chunk));
+        }
+
+        const text = Buffer.concat(chunks).toString("utf8");
+
+        let json;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          json = { raw: text };
+        }
+
+        return [this.helpers.returnJsonArray(json)];
+      }
+
+      // Normal JSON response
+      return [this.helpers.returnJsonArray(response.data)];
+    } catch (error: any) {
+      throw new NodeOperationError(this.getNode(), error, {
+        message: "Failed to connect to MCP Server",
+      });
+    }
+  }
+}

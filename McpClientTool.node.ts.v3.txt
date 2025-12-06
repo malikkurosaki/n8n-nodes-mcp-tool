@@ -1,0 +1,361 @@
+// =====================
+//  MCP CLIENT TOOL (AI-Agent only)
+//  Compatible with OpenAPI-to-MCP servers
+// =====================
+
+import {
+    type IDataObject,
+    type INodeExecutionData,
+    type INodeType,
+    type INodeTypeDescription,
+    type INodePropertyOptions,
+    type ILoadOptionsFunctions,
+    NodeOperationError,
+} from 'n8n-workflow';
+
+/* -----------------------------
+   Types (MCP Spec Compliant)
+----------------------------- */
+interface MCPPayload {
+    name: string;
+    description?: string;
+    inputSchema?: IDataObject;
+}
+interface MCPToolsListResult {
+    tools: MCPPayload[];
+}
+interface JsonRpcRequest {
+    jsonrpc: '2.0';
+    id: string | number;
+    method: string;
+    params?: any;
+}
+interface JsonRpcSuccessResponse<T = any> {
+    jsonrpc: '2.0';
+    id: string | number;
+    result: T;
+}
+interface JsonRpcErrorResponse {
+    jsonrpc: '2.0';
+    id: string | number;
+    error: { code: number; message: string; data?: any };
+}
+type JsonRpcResponse<T = any> = JsonRpcSuccessResponse<T> | JsonRpcErrorResponse;
+
+/* -----------------------------
+   Helpers
+----------------------------- */
+function parseEndpoint(endpoint: string): string {
+    return endpoint.trim().replace(/\/+$/, '');
+}
+function generateRpcId(): string {
+    return `n8n_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/* -----------------------------
+   Node Definition
+----------------------------- */
+export class McpClientTool implements INodeType {
+    description: INodeTypeDescription = {
+        displayName: 'MCP Client Tool',
+        name: 'mcpClientTool',
+        icon: 'file:icon.svg',
+        group: ['transform'],
+        version: 1,
+        usableAsTool: true,
+        description:
+            'Connects to MCP server and exposes available tools to AI Agent. ' +
+            'The agent will automatically discover and call tools from the MCP server. ' +
+            'This node acts as a bridge between n8n AI Agent and MCP protocol.',
+        defaults: { name: 'MCP Client' },
+        inputs: ['main'],
+        outputs: ['main'],
+        credentials: [{ name: 'mcptool', required: false }],
+        properties: [
+            {
+                displayName: 'MCP Server Endpoint',
+                name: 'endpoint',
+                type: 'string',
+                default: 'https://cld-dkr-prod-jenna-mcp.wibudev.com/mcp',
+                description: 'The JSON-RPC endpoint of your MCP server',
+                required: true,
+            },
+            {
+                displayName: 'Tool Selection Mode',
+                name: 'toolSelection',
+                type: 'options',
+                default: 'all',
+                options: [
+                    { name: 'Expose All Tools', value: 'all', description: 'Agent can use all tools from MCP server' },
+                    { name: 'Only Selected Tools', value: 'selected', description: 'Agent can only use selected tools' },
+                    { name: 'All Except Selected', value: 'except', description: 'Agent can use all tools except selected ones' },
+                ],
+                description: 'Control which MCP tools are available to the AI Agent',
+            },
+            {
+                displayName: 'Tools',
+                name: 'selectedTools',
+                type: 'multiOptions',
+                default: [],
+                typeOptions: { loadOptionsMethod: 'getMcpTools' },
+                displayOptions: { show: { toolSelection: ['selected', 'except'] } },
+                description: 'Select tools to include or exclude',
+            },
+        ],
+    };
+
+    methods = {
+        loadOptions: {
+            async getMcpTools(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+                const endpoint = parseEndpoint(this.getNodeParameter('endpoint', 0) as string);
+                const id = generateRpcId();
+                const request: JsonRpcRequest = { jsonrpc: '2.0', id, method: 'tools/list' };
+
+                let res: JsonRpcResponse<MCPToolsListResult>;
+                try {
+                    res = await this.helpers.request({ 
+                        method: 'POST', 
+                        uri: endpoint, 
+                        json: true, 
+                        body: request 
+                    });
+                } catch (e: any) {
+                    throw new NodeOperationError(
+                        this.getNode(), 
+                        `Failed to connect to MCP server: ${e.message || e}`
+                    );
+                }
+
+                if ('error' in res) {
+                    throw new NodeOperationError(
+                        this.getNode(), 
+                        `MCP server error: [${res.error.code}] ${res.error.message}`
+                    );
+                }
+
+                const tools = res.result?.tools;
+                if (!Array.isArray(tools)) {
+                    throw new NodeOperationError(
+                        this.getNode(), 
+                        'Invalid response from MCP server: tools list not found'
+                    );
+                }
+
+                return tools.map(t => ({ 
+                    name: `${t.name}${t.description ? ` - ${t.description}` : ''}`, 
+                    value: t.name 
+                }));
+            },
+        },
+
+        loadMethods: {
+            // Method ini dipanggil oleh AI Agent untuk mendapatkan list tool yang tersedia
+            async getAiToolDefinitions(this: any) {
+                const endpoint = parseEndpoint(this.getNodeParameter('endpoint', 0) as string);
+                const id = generateRpcId();
+                const request: JsonRpcRequest = { jsonrpc: '2.0', id, method: 'tools/list' };
+
+                let res: JsonRpcResponse<MCPToolsListResult>;
+                try {
+                    res = await this.helpers.request({ 
+                        method: 'POST', 
+                        uri: endpoint, 
+                        json: true, 
+                        body: request 
+                    });
+                } catch (e) {
+                    console.error('Failed to fetch MCP tools:', e);
+                    return [];
+                }
+
+                if ('error' in res || !Array.isArray(res.result?.tools)) {
+                    console.error('Invalid MCP response:', res);
+                    return [];
+                }
+
+                const mode = this.getNodeParameter('toolSelection', 0) as string;
+                const selected = this.getNodeParameter('selectedTools', 0, []) as string[];
+
+                // Filter tools berdasarkan mode selection
+                const filteredTools = res.result.tools.filter(t => {
+                    if (mode === 'all') return true;
+                    if (mode === 'selected') return selected.includes(t.name);
+                    if (mode === 'except') return !selected.includes(t.name);
+                    return true;
+                });
+
+                // Format tools untuk AI Agent (OpenAI function calling format)
+                return filteredTools.map(t => ({
+                    name: t.name,
+                    description: t.description || `Call ${t.name} tool on MCP server`,
+                    parameters: t.inputSchema || { 
+                        type: 'object', 
+                        properties: {},
+                        additionalProperties: true 
+                    },
+                }));
+            },
+        },
+    };
+
+    async execute(this: any): Promise<INodeExecutionData[][]> {
+        const items = this.getInputData();
+        const output: INodeExecutionData[] = [];
+        const endpoint = parseEndpoint(this.getNodeParameter('endpoint', 0) as string);
+
+        for (let i = 0; i < items.length; i++) {
+            const json = items[i].json ?? {};
+
+            /* =============================================
+               Extract tool name & arguments from AI Agent payload
+            ============================================= */
+            let toolName: string | undefined;
+            let args: IDataObject = {};
+
+            // Coba berbagai format yang mungkin dikirim oleh agent
+            toolName = (json.tool || json.toolName || json.tool_name || json.name || json.function) as string;
+            
+            if (json.arguments) {
+                args = json.arguments as IDataObject;
+            } else if (json.params) {
+                args = json.params as IDataObject;
+            } else if (json.parameters) {
+                args = json.parameters as IDataObject;
+            } else if (json.input) {
+                args = json.input as IDataObject;
+            } else if (toolName) {
+                // Ambil semua field kecuali yang digunakan untuk tool name
+                const { tool, toolName: tn, tool_name, name, function: fn, ...rest } = json;
+                args = rest;
+            }
+
+            // Jika tidak ada toolName, berarti dipanggil manual (bukan dari agent)
+            // Kembalikan info tentang available tools
+            if (!toolName || typeof toolName !== 'string') {
+                try {
+                    // Fetch available tools dari MCP server
+                    const id = generateRpcId();
+                    const request: JsonRpcRequest = { jsonrpc: '2.0', id, method: 'tools/list' };
+                    const res: JsonRpcResponse<MCPToolsListResult> = await this.helpers.request({
+                        method: 'POST',
+                        uri: endpoint,
+                        json: true,
+                        body: request,
+                    });
+
+                    if ('error' in res) {
+                        output.push({
+                            json: {
+                                message: 'This node is designed to work with AI Agent',
+                                note: 'When used with AI Agent, the agent will automatically select and call tools',
+                                mcpServerError: res.error,
+                            },
+                            pairedItem: { item: i },
+                        });
+                    } else {
+                        const mode = this.getNodeParameter('toolSelection', 0) as string;
+                        const selected = this.getNodeParameter('selectedTools', 0, []) as string[];
+                        
+                        const allTools = res.result?.tools || [];
+                        const availableTools = allTools.filter(t => {
+                            if (mode === 'all') return true;
+                            if (mode === 'selected') return selected.includes(t.name);
+                            if (mode === 'except') return !selected.includes(t.name);
+                            return true;
+                        });
+
+                        output.push({
+                            json: {
+                                message: 'This node is designed to work with AI Agent',
+                                note: 'When used with AI Agent, the agent will automatically select and call tools',
+                                mcpServer: endpoint,
+                                totalToolsOnServer: allTools.length,
+                                exposedToAgent: availableTools.length,
+                                availableTools: availableTools.map(t => ({
+                                    name: t.name,
+                                    description: t.description,
+                                })),
+                            },
+                            pairedItem: { item: i },
+                        });
+                    }
+                } catch (e: any) {
+                    output.push({
+                        json: {
+                            message: 'This node is designed to work with AI Agent',
+                            note: 'When used with AI Agent, the agent will automatically select and call tools',
+                            mcpServer: endpoint,
+                            connectionError: e.message || 'Failed to connect to MCP server',
+                        },
+                        pairedItem: { item: i },
+                    });
+                }
+                continue;
+            }
+
+            // Build JSON-RPC request untuk MCP server
+            const rpcRequest: JsonRpcRequest = {
+                jsonrpc: '2.0',
+                id: generateRpcId(),
+                method: 'tools/call',
+                params: { 
+                    name: toolName, 
+                    arguments: args 
+                },
+            };
+
+            try {
+                const rpcResponse: JsonRpcResponse = await this.helpers.request({
+                    method: 'POST',
+                    uri: endpoint,
+                    json: true,
+                    body: rpcRequest,
+                });
+
+                if ('error' in rpcResponse) {
+                    // MCP server return error
+                    output.push({ 
+                        json: { 
+                            success: false,
+                            tool: toolName,
+                            arguments: args,
+                            error: {
+                                code: rpcResponse.error.code,
+                                message: rpcResponse.error.message,
+                                data: rpcResponse.error.data,
+                            }
+                        }, 
+                        pairedItem: { item: i } 
+                    });
+                } else {
+                    // Success
+                    output.push({ 
+                        json: { 
+                            success: true,
+                            tool: toolName,
+                            arguments: args,
+                            result: rpcResponse.result 
+                        }, 
+                        pairedItem: { item: i } 
+                    });
+                }
+            } catch (e: any) {
+                // Network or other error
+                output.push({ 
+                    json: { 
+                        success: false,
+                        tool: toolName,
+                        arguments: args,
+                        error: {
+                            message: e.message || 'Unknown error',
+                            details: e.toString(),
+                        }
+                    }, 
+                    pairedItem: { item: i } 
+                });
+            }
+        }
+
+        return [output];
+    }
+}
